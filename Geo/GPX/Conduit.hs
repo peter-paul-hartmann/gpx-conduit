@@ -3,14 +3,14 @@
  -}
 module Geo.GPX.Conduit
         ( Track(..), GPX(..), Segment(..), Point(..)
-        , readGPXFile, pt
+        , readGPXFile
+        , pt
         ) where
 
 import Control.Monad.Trans.Control
 import Control.Monad.Trans.Resource
 import Control.Monad
-import Data.Conduit
-import Data.Conduit.Text
+import Conduit
 import Data.Conduit.List as L
 import Data.Void (Void)
 import Data.Time.Format
@@ -19,7 +19,7 @@ import qualified Data.Text as T
 import System.FilePath
 import Data.String
 import Data.Maybe (fromMaybe)
-import Data.Time (UTCTime, buildTime, parseTimeM)
+import Data.Time (UTCTime, parseTimeM)
 import Data.XML.Types
 import Text.XML hiding (parseText)
 import Text.XML.Stream.Parse
@@ -30,20 +30,28 @@ import Debug.Trace
 
 -- |A GPX file usually is a single track (but can be many)
 -- with one or more segments and many points in each segment.
-data GPX = GPX  { -- waypoints  :: [Waypoint]
-                -- , routes     :: [Route]
-                tracks  :: [Track] }
-        deriving (Eq, Ord, Show, Read)
+data GPX = GPX  
+     { -- waypoints  :: [Waypoint]
+       -- , routes     :: [Route]
+        metadata :: Metadata
+     ,  tracks  :: [Track] 
+     } deriving (Eq, Ord, Show, Read)
+
+data Metadata = Metadata 
+     { mdName   :: Text
+     , mdDesc   :: Text
+     } deriving (Eq, Ord, Show, Read)
+     
 data Track = Track 
-        { trkName               :: Maybe Text
-        , trkDescription        :: Maybe Text
-        , segments              :: [Segment]
-        }
-        deriving (Eq, Ord, Show, Read)
+     { trkName               :: Maybe Text
+     , trkDescription        :: Maybe Text
+     , segments              :: [Segment]
+     } deriving (Eq, Ord, Show, Read)
 
 -- |A GPX segments is just a bundle of points.
-data Segment = Segment { points  :: [Point] }
-        deriving (Eq, Ord, Show, Read)
+data Segment = Segment 
+     { points  :: [Point] 
+     } deriving (Eq, Ord, Show, Read)
 
 type Latitude = Double
 type Longitude = Double
@@ -52,81 +60,93 @@ type Longitude = Double
 -- available in most GPS loggers.  It is possible you don't want
 -- all this data and can just made do with coordinates (via 'Pnt')
 -- or a custom derivative.
-data Point = Point
-        { pntLat        :: Latitude
-        , pntLon        :: Longitude
-        , pntEle        :: Maybe Double -- ^ In meters
-        , pntTime       :: Maybe UTCTime
-        -- , pntSpeed   :: Maybe Double -- ^ Non-standard.  Usually in meters/second.
-        }
-        deriving (Eq, Ord, Show, Read)
+data Point           = Point
+     { pntLat        :: Latitude
+     , pntLon        :: Longitude
+     , pntEle        :: Maybe Double -- ^ In meters
+     , pntTime       :: Maybe UTCTime
+     -- , pntSpeed   :: Maybe Double -- ^ Non-standard.  Usually in meters/second.
+     , pntExts       :: [ Extension ]
+     } deriving (Eq, Ord, Show, Read)
 
-pt :: Latitude -> Longitude -> Maybe Double -> Maybe UTCTime -> Point
-pt t g e m = Point t g e m
+data Extension       = Extension 
+     { extName       :: Text
+     , extValue      :: Text
+     } deriving (Eq, Ord, Show, Read)
 
-zeroPoint = Point 0 0 Nothing Nothing
+{- | code changes are inspired by the tutorial 
+https://martin.hoppenheit.info/blog/2023/xml-stream-processing-with-haskell/
+-}
+pt :: Latitude -> Longitude -> Maybe Double -> Maybe UTCTime -> [ Extension ] -> Point
+pt t g e m es = Point t g e m es
 
-readGPXFile :: FilePath -> IO (Maybe GPX)
-readGPXFile fp = runResourceT (parseFile def (fromString fp) $$ conduitGPX)
+readGPXFile :: FilePath -> IO (GPX)
+readGPXFile fp = runConduitRes $ parseFile def (fromString fp) .| readGPX -- .| output
 
-parseGPX :: (MonadThrow m, MonadBaseControl IO m) => Text -> m (Maybe GPX)
-parseGPX t = runResourceT (yield t =$= mapOutput snd (parseTextPos def) 
-                                    $$ conduitGPX)
+output :: (MonadIO m) => ConduitT GPX o m ()
+output = mapM_C (liftIO . print)
 
-conduitGPX :: MonadThrow m => Consumer Event m (Maybe GPX)
-conduitGPX =
-        tagPredicate ((== "gpx") . nameLocalName)
-                        ignoreAttrs
-                        (\_ -> do
-                skipTagAndContents "metadata" 
-                ts <- many conduitTrack
-                return $ GPX ts)
+readGPX' :: MonadThrow m => ConduitT Event Void m (Maybe GPX)
+readGPX' = parseGPX
 
-skipTagAndContents :: (MonadThrow m) => Text -> ConduitM Event o m ()
-skipTagAndContents n = do
-  tagPredicate ((== n) . nameLocalName) ignoreAttrs
-               (const $ L.sinkNull)
-  return ()
+readGPX :: MonadThrow m => ConduitT Event Void m (GPX)
+readGPX = force "failed reading GPX file " $ parseGPX
 
+parseGPX :: MonadThrow m => ConduitT Event o m (Maybe GPX)
+parseGPX =
+    tagIgnoreAttrs "gpx" (do
+        metadata <- parseMetadata
+        ts       <- many parseTrack
+        return $ GPX (fromMaybe (Metadata "" "") metadata) ts)
 
-conduitTrack :: MonadThrow m => Consumer Event m (Maybe Track)
-conduitTrack = do
-        tagPredicate ((== "trk") . nameLocalName) ignoreAttrs $ \_ -> do
-        n <- join `fmap` tagPredicate (("name" ==) . nameLocalName) ignoreAttrs (const contentMaybe)
-        d <- join `fmap` tagPredicate (("desc" ==) . nameLocalName) ignoreAttrs (const contentMaybe)
-        segs <- many conduitSegment
-        return (Track n d segs)
+parseMetadata :: MonadThrow m => ConduitT Event o m (Maybe Metadata)
+parseMetadata = do
+    tagIgnoreAttrs "metadata"  (do
+        n <- tagNoAttr "name" content
+        d <- tagNoAttr "desc" content
+        return (Metadata (fromMaybe "" n) (fromMaybe "" d)))
 
-conduitSegment :: MonadThrow m => Consumer Event m (Maybe Segment)
-conduitSegment = do 
-        tagPredicate ((== "trkseg") . nameLocalName) ignoreAttrs $ \_ -> do
-        pnts <- (many conduitPoint)
-        return (Segment pnts)
+nsGpxdata :: Text -> Name
+nsGpxdata n = Name n (Just "http://www.cluetrust.com/XML/GPXDATA/1/0") (Just "gpxdata")
 
-conduitPoint :: MonadThrow m => Consumer Event m (Maybe Point)
-conduitPoint =
-        tagPredicate ((== "trkpt") . nameLocalName )
-                                (do l <- parseDouble `fmap` requireAttr "lat"
-                                    g <- parseDouble `fmap` requireAttr "lon"
-                                    return $ zeroPoint { pntLon = g, pntLat = l })
-                                parseETS
+withName :: Name -> NameMatcher Name
+withName = matching . (==)
 
--- Parse elevation, time, and speed tags
-parseETS :: MonadThrow m => Point -> Consumer Event m Point
-parseETS pnt = do
-        let nameParse :: Name -> Maybe (Point -> Text -> Point)
-            nameParse n =
-                case nameLocalName n of
-                        "ele"   -> Just (\p t -> p { pntEle = Just (parseDouble t) })
-                        "time"  -> Just (\p t -> p { pntTime = (parseUTC t) })
-                        _       -> Just const -- ignore everything else
-            handleName :: (MonadThrow m) => pnt -> (pnt -> Text -> pnt) -> Consumer Event m pnt
-            handleName p op = fmap (op p) content
-        skipTagAndContents "extensions"
-        pnt' <- tag nameParse return (handleName pnt)
-        case pnt' of
-                Nothing -> return pnt
-                Just p  -> parseETS p
+parseTrack :: MonadThrow m => ConduitT Event o m (Maybe Track)
+parseTrack = do
+    tagIgnoreAttrs "trk" (do
+        n <- tagNoAttr "name" content
+        d <- tagNoAttr "desc" content
+        segs <- many parseSegment
+        return (Track n d segs))
+
+parseSegment :: MonadThrow m => ConduitT Event o m (Maybe Segment)
+parseSegment = do 
+    tagIgnoreAttrs "trkseg" (do
+        pnts <- (many parsePoint)
+        return (Segment pnts))
+
+parsePoint :: MonadThrow m => ConduitT Event o m (Maybe Point)
+parsePoint =
+    tag' "trkpt" parseAttributes $ \(lat, lon) -> do
+        ele <- tagNoAttr "ele" content
+        time <- tagNoAttr "time" content
+        exts <- many parseExtension
+        return $ Point { pntLon = parseDouble lon
+                       , pntLat = parseDouble lat
+                       , pntTime = parseUTC (fromMaybe "" time)
+                       , pntEle = parseDouble <$> ele
+                       , pntExts = exts 
+                       }
+  where
+    parseAttributes = (,) <$> requireAttr "lat" <*> requireAttr "lon" <* ignoreAttrs
+
+parseExtension :: MonadThrow m => ConduitT Event o m (Maybe Extension)
+parseExtension =
+    tagNoAttr "extensions" (do 
+        hr <- fromMaybe "" <$> tagNoAttr (withName $ nsGpxdata "hr") content
+        ca <- fromMaybe "" <$> tagNoAttr (withName $ nsGpxdata "cadence") content
+        return $ Extension hr ca)
 
 parseDouble :: Text -> Double
 parseDouble l = either (const 0) id (AT.parseOnly AT.double l)
