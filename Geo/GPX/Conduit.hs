@@ -2,10 +2,11 @@
 {-| This is a partial parsing of the GPX 1.0 and 1.0 exchange types.
  -}
 module Geo.GPX.Conduit
+{-
         ( Track(..), GPX(..), Segment(..), Point(..)
         , readGPXFile
         , pt
-        ) where
+        ) -} where
 
 import Control.Monad.Trans.Control
 import Control.Monad.Trans.Resource
@@ -66,7 +67,7 @@ data Point           = Point
      , pntEle        :: Maybe Double -- ^ In meters
      , pntTime       :: Maybe UTCTime
      -- , pntSpeed   :: Maybe Double -- ^ Non-standard.  Usually in meters/second.
-     , pntExts       :: [ Extension ]
+     , pntExts       :: Maybe Extension
      } deriving (Eq, Ord, Show, Read)
 
 data Extension       = Extension 
@@ -77,14 +78,11 @@ data Extension       = Extension
 {- | code changes are inspired by the tutorial 
 https://martin.hoppenheit.info/blog/2023/xml-stream-processing-with-haskell/
 -}
-pt :: Latitude -> Longitude -> Maybe Double -> Maybe UTCTime -> [ Extension ] -> Point
-pt t g e m es = Point t g e m es
+pt :: Latitude -> Longitude -> Maybe Double -> Maybe UTCTime -> Maybe Extension -> Point
+pt t g e m ext = Point t g e m ext
 
-readGPXFile :: FilePath -> IO (GPX)
-readGPXFile fp = runConduitRes $ parseFile def (fromString fp) .| readGPX -- .| output
-
-output :: (MonadIO m) => ConduitT GPX o m ()
-output = mapM_C (liftIO . print)
+readGPXFile :: FilePath -> IO (Maybe GPX)
+readGPXFile fp = runConduitRes $ parseFile def (fromString fp) .| readGPX'
 
 readGPX' :: MonadThrow m => ConduitT Event Void m (Maybe GPX)
 readGPX' = parseGPX
@@ -92,60 +90,59 @@ readGPX' = parseGPX
 readGPX :: MonadThrow m => ConduitT Event Void m (GPX)
 readGPX = force "failed reading GPX file " $ parseGPX
 
+{- has worked except the xmlns attribute in the root element -}
 parseGPX :: MonadThrow m => ConduitT Event o m (Maybe GPX)
-parseGPX =
-    tagIgnoreAttrs "gpx" (do
-        metadata <- parseMetadata
-        ts       <- many parseTrack
-        return $ GPX (fromMaybe (Metadata "" "") metadata) ts)
+parseGPX = 
+    tagIgnoreAttrs (defNs "gpx") (do
+        metadata    <- parseMetadata
+        _           <- ignoreTree (defNs "wpt") ignoreAttrs
+        ts          <- many parseTrack
+        return $ GPX (fromMaybe (Metadata "GPX" "XGPX") metadata) ts)
 
 parseMetadata :: MonadThrow m => ConduitT Event o m (Maybe Metadata)
 parseMetadata = do
-    tagIgnoreAttrs "metadata"  (do
-        n <- tagNoAttr "name" content
-        d <- tagNoAttr "desc" content
-        return (Metadata (fromMaybe "" n) (fromMaybe "" d)))
-
-nsGpxdata :: Text -> Name
-nsGpxdata n = Name n (Just "http://www.cluetrust.com/XML/GPXDATA/1/0") (Just "gpxdata")
-
-withName :: Name -> NameMatcher Name
-withName = matching . (==)
+    tagNoAttr (defNs "metadata")  (do
+        n           <- tagNoAttr (defNs "name") content
+        d           <- tagNoAttr (defNs "desc") content
+        _           <- ignoreTree (defNs "author") ignoreAttrs
+        _           <- ignoreTree (defNs "copyright") ignoreAttrs
+        _           <- ignoreTree (defNs "time") ignoreAttrs
+        return (Metadata (fromMaybe "egal" n) (fromMaybe "xegal" d)))
 
 parseTrack :: MonadThrow m => ConduitT Event o m (Maybe Track)
 parseTrack = do
-    tagIgnoreAttrs "trk" (do
-        n <- tagNoAttr "name" content
-        d <- tagNoAttr "desc" content
-        segs <- many parseSegment
-        return (Track n d segs))
+    tagNoAttr (defNs "trk") (do
+        n           <- tagNoAttr (defNs "name") content
+        -- d           <- tagNoAttr "desc" content
+        segs        <- many parseSegment
+        return (Track n Nothing segs))
 
 parseSegment :: MonadThrow m => ConduitT Event o m (Maybe Segment)
 parseSegment = do 
-    tagIgnoreAttrs "trkseg" (do
-        pnts <- (many parsePoint)
+    tagNoAttr (defNs "trkseg") (do
+        pnts        <- many parsePoint
         return (Segment pnts))
 
 parsePoint :: MonadThrow m => ConduitT Event o m (Maybe Point)
 parsePoint =
-    tag' "trkpt" parseAttributes $ \(lat, lon) -> do
-        ele <- tagNoAttr "ele" content
-        time <- tagNoAttr "time" content
-        exts <- many parseExtension
+    tag' (defNs "trkpt") parseAttributes $ \(lat, lon) -> (do
+--        ele       <- tagNoAttr "ele" content
+        time        <- tagNoAttr (defNs "time") content
+        exts        <- parseExtension
         return $ Point { pntLon = parseDouble lon
                        , pntLat = parseDouble lat
-                       , pntTime = parseUTC (fromMaybe "" time)
-                       , pntEle = parseDouble <$> ele
+                       , pntTime = parseUTC (fromMaybe "2026-02-10T13:09:01.237" time)
+                       , pntEle = Nothing --parseDouble <$> ele
                        , pntExts = exts 
-                       }
+                       })
   where
     parseAttributes = (,) <$> requireAttr "lat" <*> requireAttr "lon" <* ignoreAttrs
 
 parseExtension :: MonadThrow m => ConduitT Event o m (Maybe Extension)
 parseExtension =
-    tagNoAttr "extensions" (do 
-        hr <- fromMaybe "" <$> tagNoAttr (withName $ nsGpxdata "hr") content
-        ca <- fromMaybe "" <$> tagNoAttr (withName $ nsGpxdata "cadence") content
+    tagNoAttr (defNs "extensions") (do 
+        hr          <- fromMaybe "" <$> tagNoAttr (nsGpxdata "hr") content
+        ca          <- fromMaybe "" <$> tagNoAttr (nsGpxdata "cadence") content
         return $ Extension hr ca)
 
 parseDouble :: Text -> Double
@@ -154,8 +151,8 @@ parseDouble l = either (const 0) id (AT.parseOnly AT.double l)
 parseUTC :: Text -> Maybe UTCTime
 parseUTC = either (const Nothing) id . AT.parseOnly (do 
         yearMonthDay <- AT.manyTill AT.anyChar (AT.char 'T')
-        hourMinSec <- AT.manyTill AT.anyChar (AT.choice [AT.char '.', AT.char 'Z'])
-        fraction <- AT.choice [AT.manyTill AT.anyChar (AT.char 'Z'), return ""]
+        hourMinSec   <- AT.manyTill AT.anyChar (AT.choice [AT.char '.', AT.char 'Z'])
+        fraction     <- AT.choice [AT.manyTill AT.anyChar (AT.char 'Z'), return ""]
         -- The Time package version 1.4 does not handle F T and Q property for
         -- buildTime.
         -- return (buildTime defaultTimeLocale 
@@ -163,3 +160,10 @@ parseUTC = either (const Nothing) id . AT.parseOnly (do
         return (parseTimeM True defaultTimeLocale "%F %T %Q"
                         (unwords [yearMonthDay,hourMinSec,'.':fraction]))
         )
+
+defNs :: Text -> NameMatcher Name
+defNs n = matching (== Name n (Just "http://www.topografix.com/GPX/1/1") (Nothing))
+
+nsGpxdata :: Text -> NameMatcher Name
+nsGpxdata n = matching (== Name n (Just "http://www.cluetrust.com/XML/GPXDATA/1/0") (Just "gpxdata"))
+
