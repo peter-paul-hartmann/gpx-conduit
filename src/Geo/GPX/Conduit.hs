@@ -2,7 +2,7 @@
 {-| This is a partial parsing of the GPX 1.0 and 1.0 exchange types.
  -}
 module Geo.GPX.Conduit
-        ( Track(..), GPX(..), Segment(..), Point(..)
+        ( GPX(..), Metadata, Track(..), Segment(..), Point(..), Extensions(..), Longitude, Latitude
         , readGPXFile
         , pt
         ) where
