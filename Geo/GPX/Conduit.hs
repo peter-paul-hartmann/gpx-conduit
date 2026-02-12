@@ -95,9 +95,9 @@ parseGPX :: MonadThrow m => ConduitT Event o m (Maybe GPX)
 parseGPX = 
     tagIgnoreAttrs (defNs "gpx") (do
         metadata    <- parseMetadata
-        _           <- ignoreTree (defNs "wpt") ignoreAttrs
+        _           <- many_ $ ignoreTree (defNs "wpt") ignoreAttrs
         ts          <- many parseTrack
-        return $ GPX (fromMaybe (Metadata "GPX" "XGPX") metadata) ts)
+        return $ GPX (fromMaybe (Metadata "" "") metadata) ts)
 
 parseMetadata :: MonadThrow m => ConduitT Event o m (Maybe Metadata)
 parseMetadata = do
@@ -114,6 +114,7 @@ parseTrack = do
     tagNoAttr (defNs "trk") (do
         n           <- tagNoAttr (defNs "name") content
         -- d           <- tagNoAttr "desc" content
+        _           <- ignoreTree (nsExtensions "extensions") ignoreAttrs
         segs        <- many parseSegment
         return (Track n Nothing segs))
 
@@ -141,8 +142,8 @@ parsePoint =
 parseExtension :: MonadThrow m => ConduitT Event o m (Maybe Extension)
 parseExtension =
     tagNoAttr (defNs "extensions") (do 
-        hr          <- fromMaybe "" <$> tagNoAttr (nsGpxdata "hr") content
-        ca          <- fromMaybe "" <$> tagNoAttr (nsGpxdata "cadence") content
+        hr          <- fromMaybe "" <$> tagNoAttr (nsExtensions "hr") content
+        ca          <- fromMaybe "" <$> tagNoAttr (nsExtensions "cadence") content
         return $ Extension hr ca)
 
 parseDouble :: Text -> Double
@@ -164,6 +165,6 @@ parseUTC = either (const Nothing) id . AT.parseOnly (do
 defNs :: Text -> NameMatcher Name
 defNs n = matching (== Name n (Just "http://www.topografix.com/GPX/1/1") (Nothing))
 
-nsGpxdata :: Text -> NameMatcher Name
-nsGpxdata n = matching (== Name n (Just "http://www.cluetrust.com/XML/GPXDATA/1/0") (Just "gpxdata"))
+nsExtensions :: Text -> NameMatcher Name
+nsExtensions n = matching (== Name n (Just "http://www.cluetrust.com/XML/GPXDATA/1/0") (Just "gpxdata"))
 
