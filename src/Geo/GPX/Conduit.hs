@@ -1,5 +1,9 @@
 {-# LANGUAGE OverloadedStrings, ScopedTypeVariables, FlexibleContexts, RankNTypes #-}
 {-| This is a partial parsing of the GPX 1.0 and 1.0 exchange types.
+
+[More information regarding the gpx standard](http://www.topografix.com/gpx.asp)
+
+[xml schema of the gpx standard used as default namespace in the gpx files](http://www.topografix.com/GPX/1/1)
  -}
 module Geo.GPX.Conduit
         ( GPX(..), Metadata, Track(..), Segment(..), Point(..), Extensions(..), Longitude, Latitude
@@ -72,13 +76,21 @@ data Extensions      = Extensions
      { exts          :: [(Text,Text)]
      } deriving (Eq, Ord, Show, Read)
 
-{- | code changes are inspired by the tutorial 
-https://martin.hoppenheit.info/blog/2023/xml-stream-processing-with-haskell/
+{-| code changes are inspired by 
+[this tutorial](https://martin.hoppenheit.info/blog/2023/xml-stream-processing-with-haskell/)
 -}
 pt :: Latitude -> Longitude -> Maybe Double -> Maybe UTCTime -> Maybe Extensions-> Point
 pt t g e m ext = Point t g e m ext
 
-readGPXFile :: FilePath -> IO (Maybe GPX)
+{-| 
+Extract the data from the gpx file and return the result. The implementation uses the streaming 
+API of xml-conduit. Therefore it is very memory efficient.
+
+Not all elements are extracted (e.g way points, metadata, etc.). Please look at the GPX data structure
+for more details.
+-}
+readGPXFile :: FilePath          -- ^ full path pointing to an xml file adhering to the gpx standard
+            -> IO (Maybe GPX)    -- ^ GPX structure if the file could be successfully processed
 readGPXFile fp = runConduitRes $ parseFile def (fromString fp) .| readGPX'
 
 readGPX' :: MonadThrow m => ConduitT Event Void m (Maybe GPX)
